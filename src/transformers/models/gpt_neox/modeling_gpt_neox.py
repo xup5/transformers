@@ -145,6 +145,43 @@ class GPTNeoXPreTrainedModel(PreTrainedModel):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
+class AttentionApproximation(nn.Module):
+    """
+    Attention approximation
+    Note: this implimentation only works properly for single query token. It can run for multiple query tokens but the results are not correct.
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.num_attention_heads = config.num_attention_heads
+        self.hidden_size = config.hidden_size
+        if self.hidden_size % self.num_attention_heads != 0:
+            raise ValueError(
+                "The hidden size is not divisble by the number of attention heads! Make sure to update them"
+            )
+        self.head_size = self.hidden_size // self.num_attention_heads
+        self.head_size = torch.tensor(self.head_size, dtype=torch.float32)
+        self.norm_factor = self.head_size**-0.5
+        self.norm_factor = torch.tensor(self.norm_factor, dtype=torch.float32)
+        
+    def forward(self, query, keystats, valuestates, n):
+        # query: [batch_size, num_heads, querylength, embed_size_per_head]
+        # keystats: (mean_keys [batch_size, num_heads, embed_size_per_head], Kij [batch_size, num_heads, embed_size_per_head, embed_size_per_head])
+        # valuestates: (mean_values, Mij)
+        # n: sequence length
+        n = torch.tensor(n, dtype=query.dtype, device=query.device)
+        mean_keys, Kij = keystats
+        mean_values, Mij = valuestates
+        qkbar = torch.einsum("bhqe,bhe->bhq", query, mean_keys)*self.norm_factor
+        eqkbar = torch.exp(qkbar)
+        qqKij = 1/(2*self.head_size)*torch.einsum("bhqi,bhqj,bhij->bhq", query,query,Kij)
+        # qqKijV = torch.einsum("bhq,bhe->bhqe", qqKij, mean_values)
+        qWij = torch.einsum("bhqi,bhij->bhqj", query, Mij)
+        denominator = eqkbar*(n + qqKij)
+        numerator = torch.einsum("bhq,bhe->bhqe", (qqKij+n), mean_values) + 1/torch.sqrt(self.head_size)*qWij
+        numerator = torch.einsum("bhq,bhqe->bhqe",eqkbar,numerator)
+        
+        return numerator/denominator.unsqueeze(-1) # [batch_size, num_heads, querylength, embed_size_per_head]
 
 class GPTNeoXAttention(nn.Module):
     def __init__(self, config, layer_idx=None):
@@ -163,6 +200,7 @@ class GPTNeoXAttention(nn.Module):
 
         self.register_buffer("masked_bias", torch.tensor(-1e9), persistent=False)
         self.rotary_emb = GPTNeoXRotaryEmbedding(config=self.config)
+        self._attn_approximation = AttentionApproximation(config)
 
         if layer_idx is None:
             logger.warning_once(
@@ -200,18 +238,28 @@ class GPTNeoXAttention(nn.Module):
         padding_mask: Optional[torch.Tensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        past_key_values_stats: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     ):
         # Apply attention-specific projections and rope
-        query, key, value, present = self._attn_projections_and_rope(
-            hidden_states=hidden_states,
-            position_ids=position_ids,
-            layer_past=layer_past,
-            use_cache=use_cache,
-            position_embeddings=position_embeddings,
-        )
+        if past_key_values_stats is None:
+            query, key, value, present = self._attn_projections_and_rope(
+                hidden_states=hidden_states,
+                position_ids=position_ids,
+                layer_past=layer_past,
+                use_cache=use_cache,
+                position_embeddings=position_embeddings,
+            )
 
-        # Compute attention
-        attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
+            # Compute attention
+            attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
+        else:
+            query, key, value = self._attn_projections_and_rope_approximation(
+                hidden_states=hidden_states,
+                position_ids=position_ids,
+                position_embeddings=position_embeddings,
+            )
+            present = (key, value)
+            attn_output = self._attn_approximation(query, past_key_values_stats[0][self.layer_idx], past_key_values_stats[1][self.layer_idx], past_key_values_stats[2])
 
         # Reshape outputs
         attn_output = self._merge_heads(attn_output, self.num_attention_heads, self.head_size)
@@ -303,6 +351,46 @@ class GPTNeoXAttention(nn.Module):
             key, value = layer_past.update(key, value, self.layer_idx, cache_kwargs)
 
         return query, key, value, layer_past
+    
+    def _attn_projections_and_rope_approximation(
+        self,
+        hidden_states: torch.FloatTensor,
+        position_ids: torch.LongTensor,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+    ):
+        qkv = self.query_key_value(hidden_states)
+
+        # [batch, seq_len, (num_heads * 3 * head_size)]
+        #   --> [batch, seq_len, num_heads, 3 * head_size]
+        new_qkv_shape = qkv.size()[:-1] + (self.num_attention_heads, 3 * self.head_size)
+        qkv = qkv.view(*new_qkv_shape)
+
+        # [batch, seq_len, num_attention_heads, 3 * head_size] --> 3 [batch, num_attention_heads, seq_len, head_size]
+        query = qkv[..., : self.head_size].permute(0, 2, 1, 3)
+        key = qkv[..., self.head_size : 2 * self.head_size].permute(0, 2, 1, 3)
+        value = qkv[..., 2 * self.head_size :].permute(0, 2, 1, 3)
+
+        # Compute rotary embeddings on rotary_ndims
+        query_rot = query[..., : self.rotary_ndims]
+        query_pass = query[..., self.rotary_ndims :]
+        key_rot = key[..., : self.rotary_ndims]
+        key_pass = key[..., self.rotary_ndims :]
+
+        if position_embeddings is None:
+            logger.warning_once(
+                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.46 `position_ids` will be "
+                "removed and `position_embeddings` will be mandatory."
+            )
+            cos, sin = self.rotary_emb(value, position_ids)
+        else:
+            cos, sin = position_embeddings
+        query, key = apply_rotary_pos_emb(query_rot, key_rot, cos, sin)
+        query = torch.cat((query, query_pass), dim=-1)
+        key = torch.cat((key, key_pass), dim=-1)
+        
+        return query, key, value
 
     def _attn(self, query, key, value, attention_mask=None, head_mask=None):
         # q, k, v: [bs, num_attention_heads, seq_len, attn_head_size]
@@ -354,6 +442,7 @@ class GPTNeoXAttention(nn.Module):
 
         attn_output = torch.matmul(attn_weights, value)
         return attn_output, attn_weights
+        
 
 
 class GPTNeoXFlashAttention2(GPTNeoXAttention):
@@ -754,6 +843,7 @@ class GPTNeoXLayer(nn.Module):
         output_attentions: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        past_key_values_stats: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
     ):
         attention_layer_outputs = self.attention(
             self.input_layernorm(hidden_states),
@@ -765,6 +855,7 @@ class GPTNeoXLayer(nn.Module):
             output_attentions=output_attentions,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
+            past_key_values_stats=past_key_values_stats,
         )
         attn_output = attention_layer_outputs[0]  # output_attn: attn_output, present, (attn_weights)
         attn_output = self.post_attention_dropout(attn_output)
@@ -785,7 +876,7 @@ class GPTNeoXLayer(nn.Module):
             mlp_output = self.post_mlp_dropout(mlp_output)
             hidden_states = mlp_output + attn_output
 
-        if use_cache:
+        if use_cache or past_key_values_stats is not None:
             outputs = (hidden_states,) + outputs  # hidden_states, present, (attn_weights)
         else:
             outputs = (hidden_states,) + outputs[1:]  # hidden_states, (attn_weights)
@@ -916,7 +1007,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        past_key_values_stats: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+        past_key_values_stats: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         r"""
         use_cache (`bool`, *optional*):
@@ -930,6 +1021,12 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         use_stat_approximation = True if past_key_values_stats is not None else False
+        
+        if use_cache and use_stat_approximation:
+            raise ValueError(
+                "`use_cache` and `past_key_values_stats` cannot be set to `True` at the same time. "
+                "Please set one of them to `False`."
+            )
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
@@ -986,6 +1083,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
         next_decoder_cache = None
         all_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
+        new_key_values = () if use_stat_approximation else None
         for i, layer in enumerate(
             self.layers,
         ):
@@ -1019,8 +1117,10 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
                     past_key_values_stats=past_key_values_stats,
                 )
             hidden_states = outputs[0]
-            if use_cache is True:
+            if use_cache is True: # ???
                 next_decoder_cache = outputs[1]
+            if use_stat_approximation:
+                new_key_values = new_key_values + (outputs[1],)
             if output_attentions:
                 all_attentions = all_attentions + (outputs[2 if use_cache else 1],)
 
@@ -1034,13 +1134,15 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
             next_cache = next_cache.to_legacy_cache()
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_attentions] if v is not None)
+            return tuple(v for v in [hidden_states, next_cache, past_key_values_stats, new_key_values, all_hidden_states, all_attentions] if v is not None)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_attentions,
+            past_key_values_stats=past_key_values_stats,
+            new_key_values=new_key_values,
         )
 
     # Copied from transformers.models.llama.modeling_llama.LlamaModel._update_causal_mask
