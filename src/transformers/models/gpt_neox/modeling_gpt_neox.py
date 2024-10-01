@@ -916,6 +916,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        past_key_values_stats: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         r"""
         use_cache (`bool`, *optional*):
@@ -928,6 +929,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         use_cache = use_cache if use_cache is not None else self.config.use_cache
+        use_stat_approximation = True if past_key_values_stats is not None else False
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
@@ -1014,6 +1016,7 @@ class GPTNeoXModel(GPTNeoXPreTrainedModel):
                     output_attentions=output_attentions,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
+                    past_key_values_stats=past_key_values_stats,
                 )
             hidden_states = outputs[0]
             if use_cache is True:
@@ -1145,6 +1148,7 @@ class GPTNeoXForCausalLM(GPTNeoXPreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        past_key_values_stats: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1154,6 +1158,15 @@ class GPTNeoXForCausalLM(GPTNeoXPreTrainedModel, GenerationMixin):
         use_cache (`bool`, *optional*):
             If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding (see
             `past_key_values`).
+            
+        past_key_values_stats: Tuples (keystats, valuestats, n)
+            where keystats = (mean_keys, Kij),
+            mean_keys has shape [batch_size, num_heads, embed_size_per_head], 
+            Kij has shape [batch_size, num_heads, embed_size_per_head, embed_size_per_head];
+            same for valuestats.
+            n is the number of tokens in previous sequence.
+            Note: 1) when past_key_values_stats is not None, past_key_values should be None. 
+                    2) only support query (input_ids) length = 1.
 
         Returns:
 
@@ -1187,6 +1200,7 @@ class GPTNeoXForCausalLM(GPTNeoXPreTrainedModel, GenerationMixin):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            past_key_values_stats=past_key_values_stats,
         )
 
         hidden_states = outputs[0]
