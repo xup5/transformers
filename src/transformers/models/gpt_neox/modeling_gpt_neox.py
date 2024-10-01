@@ -164,13 +164,13 @@ class AttentionApproximation(nn.Module):
         self.norm_factor = self.head_size**-0.5
         self.norm_factor = torch.tensor(self.norm_factor, dtype=torch.float32)
         
-    def forward(self, query, keystats, valuestates, n):
+    def forward(self, query, keystates, valuestates, n):
         # query: [batch_size, num_heads, querylength, embed_size_per_head]
-        # keystats: (mean_keys [batch_size, num_heads, embed_size_per_head], Kij [batch_size, num_heads, embed_size_per_head, embed_size_per_head])
+        # keystates: (mean_keys [batch_size, num_heads, embed_size_per_head], Kij [batch_size, num_heads, embed_size_per_head, embed_size_per_head])
         # valuestates: (mean_values, Mij)
         # n: sequence length
         n = torch.tensor(n, dtype=query.dtype, device=query.device)
-        mean_keys, Kij = keystats
+        mean_keys, Kij = keystates
         mean_values, Mij = valuestates
         qkbar = torch.einsum("bhqe,bhe->bhq", query, mean_keys)*self.norm_factor
         eqkbar = torch.exp(qkbar)
@@ -259,7 +259,10 @@ class GPTNeoXAttention(nn.Module):
                 position_embeddings=position_embeddings,
             )
             present = (key, value)
-            attn_output = self._attn_approximation(query, past_key_values_stats[0][self.layer_idx], past_key_values_stats[1][self.layer_idx], past_key_values_stats[2])
+            keystates = (past_key_values_stats[0][0][self.layer_idx], past_key_values_stats[0][1][self.layer_idx])
+            valuestates = (past_key_values_stats[1][0][self.layer_idx], past_key_values_stats[1][1][self.layer_idx])
+            n = past_key_values_stats[2]
+            attn_output = self._attn_approximation(query=query, keystates=keystates, valuestates=valuestates, n=n)
 
         # Reshape outputs
         attn_output = self._merge_heads(attn_output, self.num_attention_heads, self.head_size)
