@@ -144,6 +144,29 @@ class GPTNeoXPreTrainedModel(PreTrainedModel):
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+            
+def calculate_mean_covariance(past_key_values):
+    keys = [kv[0] for kv in past_key_values]
+    values = [kv[1] for kv in past_key_values]
+
+    # Concatenate keys and values along the first dimension (layers)
+    keys_tensor = torch.stack(keys, dim=0) # (num_layers, batch_size, num_heads, sequence_length, embed_size_per_head) [24, 1, 16, 9, 128]
+    values_tensor = torch.stack(values, dim=0)
+
+    # Calculate mean
+    mean_keys = torch.mean(keys_tensor, dim=3, keepdim=True) # (num_layers, batch_size, num_heads, 1, embed_size_per_head)
+    mean_values = torch.mean(values_tensor, dim=3, keepdim=True)
+
+    # Calculate covariance
+    keys_centered = keys_tensor - mean_keys # (num_layers, batch_size, num_heads, sequence_length, embed_size_per_head) 
+    values_centered = values_tensor - mean_values
+
+    Kij = torch.einsum("lbhsi,lbhsj->lbhij", keys_centered, keys_centered) # (num_layers, batch_size, num_heads, embed_size_per_head, embed_size_per_head)
+    Mij = torch.einsum("lbhsi,lbhsj->lbhij", keys_centered, values_centered) # (num_layers, batch_size, num_heads, embed_size_per_head, embed_size_per_head)
+    
+    # return (torch.squeeze(mean_keys,dim=-2), Kij), (torch.squeeze(mean_values, dim=-2), Mij)
+    return ((torch.squeeze(mean_keys,dim=-2), Kij), (torch.squeeze(mean_values, dim=-2), Mij), keys_tensor.shape[3])
+
 
 class AttentionApproximation(nn.Module):
     """
@@ -1337,6 +1360,8 @@ class GPTNeoXForCausalLM(GPTNeoXPreTrainedModel, GenerationMixin):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            past_key_values_stats=outputs.past_key_values_stats,
+            new_key_values=outputs.new_key_values,
         )
 
     # can't be copied from llama, gpt-neox has embed_out and not lm_head
