@@ -711,6 +711,9 @@ class CausalLMOutputWithPast(ModelOutput):
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+    
+    past_key_values_stats: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    new_key_values:  Optional[Tuple[Tuple[torch.FloatTensor]]] = None
 
 
 @dataclass
