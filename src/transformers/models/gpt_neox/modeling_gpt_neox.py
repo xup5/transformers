@@ -172,14 +172,20 @@ class AttentionApproximation(nn.Module):
         n = torch.tensor(n, dtype=query.dtype, device=query.device)
         mean_keys, Kij = keystates
         mean_values, Mij = valuestates
-        qkbar = torch.einsum("bhqe,bhe->bhq", query, mean_keys)*self.norm_factor
-        eqkbar = torch.exp(qkbar)
-        qqKij = 1/(2*self.head_size)*torch.einsum("bhqi,bhqj,bhij->bhq", query,query,Kij)
-        # qqKijV = torch.einsum("bhq,bhe->bhqe", qqKij, mean_values)
+        # Below code is not efficient and has numerical stability issues.
+        # qkbar = torch.einsum("bhqe,bhe->bhq", query, mean_keys)*self.norm_factor
+        # eqkbar = torch.exp(qkbar) # CAUTION: contain large values.... has inf values
+        # qqKij = 1/(2*self.head_size)*torch.einsum("bhqi,bhqj,bhij->bhq", query,query,Kij)
+        # # qqKijV = torch.einsum("bhq,bhe->bhqe", qqKij, mean_values)
+        # qWij = torch.einsum("bhqi,bhij->bhqj", query, Mij)
+        # denominator = eqkbar*(n + qqKij) # CAUTION: contain large values....
+        # numerator = torch.einsum("bhq,bhe->bhqe", (qqKij+n), mean_values) + 1/torch.sqrt(self.head_size)*qWij
+        # numerator = torch.einsum("bhq,bhqe->bhqe",eqkbar,numerator) # CAUTION: contain large values....
+        # Use code below instead
         qWij = torch.einsum("bhqi,bhij->bhqj", query, Mij)
-        denominator = eqkbar*(n + qqKij)
+        qqKij = 1/(2*self.head_size)*torch.einsum("bhqi,bhqj,bhij->bhq", query,query,Kij)
         numerator = torch.einsum("bhq,bhe->bhqe", (qqKij+n), mean_values) + 1/torch.sqrt(self.head_size)*qWij
-        numerator = torch.einsum("bhq,bhqe->bhqe",eqkbar,numerator)
+        denominator = n+qqKij
         
         return numerator/denominator.unsqueeze(-1) # [batch_size, num_heads, querylength, embed_size_per_head]
 
