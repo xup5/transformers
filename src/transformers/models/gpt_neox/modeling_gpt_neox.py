@@ -206,7 +206,8 @@ class AttentionApproximation(nn.Module):
         # numerator = torch.einsum("bhq,bhqe->bhqe",eqkbar,numerator) # CAUTION: contain large values....
         # Use code below instead
         qWij = torch.einsum("bhqi,bhij->bhqj", query, Mij)
-        qqKij = 1/(2*self.head_size)*torch.einsum("bhqi,bhqj,bhij->bhq", query,query,Kij)
+        # qqKij = 1/(2*self.head_size)*torch.einsum("bhqi,bhqj,bhij->bhq", query,query,Kij) # this is not stable under fp16
+        qqKij = torch.einsum("bhqi,bhqj,bhij->bhq", query,query,1/(2*self.head_size)*Kij)
         numerator = torch.einsum("bhq,bhe->bhqe", (qqKij+n), mean_values) + 1/torch.sqrt(self.head_size)*qWij
         denominator = n+qqKij
         
