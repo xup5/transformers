@@ -206,14 +206,14 @@ class AttentionApproximation(nn.Module):
         # numerator = torch.einsum("bhq,bhe->bhqe", (qqKij+n), mean_values) + 1/torch.sqrt(self.head_size)*qWij
         # numerator = torch.einsum("bhq,bhqe->bhqe",eqkbar,numerator) # CAUTION: contain large values....
         # Use code below instead
-        qWij = torch.einsum("bhqi,bhij->bhqj", query, Mij)
+        qWij = torch.einsum("bhqi,bhij->bhqj", self.stability_factor*query, Mij/torch.sqrt(self.head_size))
         # qqKij = 1/(2*self.head_size)*torch.einsum("bhqi,bhqj,bhij->bhq", query,query,Kij) # this is not stable under fp16
-        qqKij = torch.einsum("bhqi,bhqj,bhij->bhq", query,query,1/(2*self.head_size)*Kij)
-        numerator = torch.einsum("bhq,bhe->bhqe", (qqKij+n), self.stability_factor*mean_values) + 1/torch.sqrt(self.head_size)*self.stability_factor*qWij
-        denominator = n+qqKij
+        qqKij = torch.einsum("bhqi,bhqj,bhij->bhq", query, self.stability_factor*query, 1/(2*self.head_size)*Kij)
+        denominator = self.stability_factor*n+qqKij
+        numerator = torch.einsum("bhq,bhe->bhqe", denominator, mean_values) + qWij
         
-        return numerator/denominator.unsqueeze(-1)/self.stability_factor # [batch_size, num_heads, querylength, embed_size_per_head]
-
+        return numerator/denominator.unsqueeze(-1) # [batch_size, num_heads, querylength, embed_size_per_head]
+    
 class GPTNeoXAttention(nn.Module):
     def __init__(self, config, layer_idx=None):
         super().__init__()
