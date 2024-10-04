@@ -186,6 +186,7 @@ class AttentionApproximation(nn.Module):
         self.head_size = torch.tensor(self.head_size, dtype=torch.float32)
         self.norm_factor = self.head_size**-0.5
         self.norm_factor = torch.tensor(self.norm_factor, dtype=torch.float32)
+        self.stability_factor = 1e-3
         
     def forward(self, query, keystates, valuestates, n):
         # query: [batch_size, num_heads, querylength, embed_size_per_head]
@@ -208,10 +209,10 @@ class AttentionApproximation(nn.Module):
         qWij = torch.einsum("bhqi,bhij->bhqj", query, Mij)
         # qqKij = 1/(2*self.head_size)*torch.einsum("bhqi,bhqj,bhij->bhq", query,query,Kij) # this is not stable under fp16
         qqKij = torch.einsum("bhqi,bhqj,bhij->bhq", query,query,1/(2*self.head_size)*Kij)
-        numerator = torch.einsum("bhq,bhe->bhqe", (qqKij+n), mean_values) + 1/torch.sqrt(self.head_size)*qWij
+        numerator = torch.einsum("bhq,bhe->bhqe", (qqKij+n), self.stability_factor*mean_values) + 1/torch.sqrt(self.head_size)*self.stability_factor*qWij
         denominator = n+qqKij
         
-        return numerator/denominator.unsqueeze(-1) # [batch_size, num_heads, querylength, embed_size_per_head]
+        return numerator/denominator.unsqueeze(-1)/self.stability_factor # [batch_size, num_heads, querylength, embed_size_per_head]
 
 class GPTNeoXAttention(nn.Module):
     def __init__(self, config, layer_idx=None):
