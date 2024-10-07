@@ -196,6 +196,10 @@ class AttentionApproximation(nn.Module):
         n = torch.tensor(n, dtype=query.dtype, device=query.device)
         mean_keys, Kij = keystates
         mean_values, Mij = valuestates
+        # The online version need to center Kij and Mij first.
+        Kij = Kij - n*torch.einsum("bhi,bhj->bhij", mean_keys, mean_keys)
+        Mij = Mij - n*torch.einsum("bhi,bhj->bhij", mean_keys, mean_values)
+        
         # Below code is not efficient and has numerical stability issues.
         # qkbar = torch.einsum("bhqe,bhe->bhq", query, mean_keys)*self.norm_factor
         # eqkbar = torch.exp(qkbar) # CAUTION: contain large values.... has inf values
@@ -283,6 +287,9 @@ class GPTNeoXAttention(nn.Module):
 
             # Compute attention
             attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
+            # update stats
+            
+            
         else:
             query, key, value = self._attn_projections_and_rope_approximation(
                 hidden_states=hidden_states,
