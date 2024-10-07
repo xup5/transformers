@@ -158,8 +158,11 @@ def calculate_mean_covariance(past_key_values):
     mean_values = torch.mean(values_tensor, dim=3, keepdim=True)
 
     # Calculate covariance
-    keys_centered = keys_tensor - mean_keys # (num_layers, batch_size, num_heads, sequence_length, embed_size_per_head) 
-    values_centered = values_tensor - mean_values
+    # keys_centered = keys_tensor - mean_keys # (num_layers, batch_size, num_heads, sequence_length, embed_size_per_head) 
+    # values_centered = values_tensor - mean_values
+    # The online version doesn't need to calculate the centered values
+    keys_centered = keys_tensor # (num_layers, batch_size, num_heads, sequence_length, embed_size_per_head) 
+    values_centered = values_tensor 
 
     Kij = torch.einsum("lbhsi,lbhsj->lbhij", keys_centered, keys_centered) # (num_layers, batch_size, num_heads, embed_size_per_head, embed_size_per_head)
     Mij = torch.einsum("lbhsi,lbhsj->lbhij", keys_centered, values_centered) # (num_layers, batch_size, num_heads, embed_size_per_head, embed_size_per_head)
