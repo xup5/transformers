@@ -251,9 +251,9 @@ class AttentionApproximationAll(nn.Module):
         mean_values = torch.cumsum(value, dim=2)
         mean_values = mean_values/n.unsqueeze(-1)
         Kij = torch.einsum("bhqi,bhqj->bhqij", key, key)
-        Kij = Kij - n.unsqueeze(-1)*torch.einsum("bhqi,bhqj->bhqij", mean_keys, mean_keys)
+        Kij = Kij - n[:, None, None]*torch.einsum("bhqi,bhqj->bhqij", mean_keys, mean_keys)
         Mij = torch.einsum("bhqi,bhqj->bhqij", key, value)
-        Mij = Mij - n.unsqueeze(-1)*torch.einsum("bhqi,bhqj->bhqij", mean_keys, mean_values)
+        Mij = Mij - n[:, None, None]*torch.einsum("bhqi,bhqj->bhqij", mean_keys, mean_values)
         
         qWij = torch.einsum("bhqi,bhqij->bhqj", self.stability_factor*query, Mij/torch.sqrt(self.head_size))
         qqKij = torch.einsum("bhqi,bhqj,bhqij->bhq", query, self.stability_factor*query, 1/(2*self.head_size)*Kij)
@@ -1345,7 +1345,7 @@ class GPTNeoXForCausalLM(GPTNeoXPreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         past_key_values_stats: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
-        approximation_mode: Optional[bool] = False,
+        approximation_mode: Optional[bool] = True,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
