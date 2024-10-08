@@ -243,32 +243,22 @@ class AttentionApproximationAll(nn.Module):
         self.stability_factor = 1e-3
         
     def forward(self, query, key, value):
-        # query: [batch_size, num_heads, querylength, embed_size_per_head]
-        # keystates: (mean_keys [batch_size, num_heads, embed_size_per_head], Kij [batch_size, num_heads, embed_size_per_head, embed_size_per_head])
-        # valuestates: (mean_values, Mij)
-        # n: sequence length
-        n = torch.tensor(n, dtype=query.dtype, device=query.device)
-        mean_keys, Kij = keystates
-        mean_values, Mij = valuestates
-        # The online version need to center Kij and Mij first.
-        Kij = Kij - n*torch.einsum("bhi,bhj->bhij", mean_keys, mean_keys)
-        Mij = Mij - n*torch.einsum("bhi,bhj->bhij", mean_keys, mean_values)
+        # query, key, value: [batch_size, num_heads, querylength, embed_size_per_head]
+        # calculate state for each token.
+        n = torch.arange(1, query.shape[2]+1, device=query.device, dtype=query.dtype)
+        mean_keys = torch.cumsum(key, dim=2)
+        mean_keys = mean_keys/n.unsqueeze(-1)
+        mean_values = torch.cumsum(value, dim=2)
+        mean_values = mean_values/n.unsqueeze(-1)
+        Kij = torch.einsum("bhqi,bhqj->bhqij", key, key)
+        Kij = Kij - n.unsqueeze(-1)*torch.einsum("bhqi,bhqj->bhqij", mean_keys, mean_keys)
+        Mij = torch.einsum("bhqi,bhqj->bhqij", key, value)
+        Mij = Mij - n.unsqueeze(-1)*torch.einsum("bhqi,bhqj->bhqij", mean_keys, mean_values)
         
-        # Below code is not efficient and has numerical stability issues.
-        # qkbar = torch.einsum("bhqe,bhe->bhq", query, mean_keys)*self.norm_factor
-        # eqkbar = torch.exp(qkbar) # CAUTION: contain large values.... has inf values
-        # qqKij = 1/(2*self.head_size)*torch.einsum("bhqi,bhqj,bhij->bhq", query,query,Kij)
-        # # qqKijV = torch.einsum("bhq,bhe->bhqe", qqKij, mean_values)
-        # qWij = torch.einsum("bhqi,bhij->bhqj", query, Mij)
-        # denominator = eqkbar*(n + qqKij) # CAUTION: contain large values....
-        # numerator = torch.einsum("bhq,bhe->bhqe", (qqKij+n), mean_values) + 1/torch.sqrt(self.head_size)*qWij
-        # numerator = torch.einsum("bhq,bhqe->bhqe",eqkbar,numerator) # CAUTION: contain large values....
-        # Use code below instead
-        qWij = torch.einsum("bhqi,bhij->bhqj", self.stability_factor*query, Mij/torch.sqrt(self.head_size))
-        # qqKij = 1/(2*self.head_size)*torch.einsum("bhqi,bhqj,bhij->bhq", query,query,Kij) # this is not stable under fp16
-        qqKij = torch.einsum("bhqi,bhqj,bhij->bhq", query, self.stability_factor*query, 1/(2*self.head_size)*Kij)
+        qWij = torch.einsum("bhqi,bhqij->bhqj", self.stability_factor*query, Mij/torch.sqrt(self.head_size))
+        qqKij = torch.einsum("bhqi,bhqj,bhqij->bhq", query, self.stability_factor*query, 1/(2*self.head_size)*Kij)
         denominator = self.stability_factor*n+qqKij
-        numerator = torch.einsum("bhq,bhe->bhqe", denominator, mean_values) + qWij
+        numerator = torch.einsum("bhq,bhqe->bhqe", denominator, mean_values) + qWij
         
         return numerator/denominator.unsqueeze(-1) # [batch_size, num_heads, querylength, embed_size_per_head]
     
@@ -346,8 +336,6 @@ class GPTNeoXAttention(nn.Module):
                 attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
             else:
                 attn_output = self._attn_approximation_all(query, key, value)
-            
-            
             
         else:
             # code below only supports taking one input token.
