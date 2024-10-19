@@ -256,7 +256,7 @@ class AttentionApproximationAll(nn.Module):
         Mij = Mij - n[:, None]*torch.einsum("bhqi,bhqj->bhqij", mean_keys, mean_values)
         qWij = torch.einsum("bhqi,bhqij->bhqj", self.stability_factor*query, Mij/torch.sqrt(self.head_size))
         qqKij = torch.einsum("bhqi,bhqj,bhqij->bhq", query, self.stability_factor*query, 1/(2*self.head_size)*Kij)
-        denominator = self.stability_factor*n+qqKij
+        denominator = self.stability_factor*n.squeeze()+qqKij
         
         return mean_values + qWij/denominator.unsqueeze(-1) # [batch_size, num_heads, querylength, embed_size_per_head]
     
