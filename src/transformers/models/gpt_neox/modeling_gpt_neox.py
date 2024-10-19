@@ -238,29 +238,27 @@ class AttentionApproximationAll(nn.Module):
             )
         self.head_size = self.hidden_size // self.num_attention_heads
         self.head_size = torch.tensor(self.head_size, dtype=torch.float32)
-        self.norm_factor = self.head_size**-0.5
-        self.norm_factor = torch.tensor(self.norm_factor, dtype=torch.float32)
         self.stability_factor = 1e-3
         
     def forward(self, query, key, value):
-        # query, key, value: [batch_size, num_heads, querylength, embed_size_per_head]
+        # query, key, value: [batch_size, num_heads, seqlength, embed_size_per_head]
         # calculate state for each token.
-        n = torch.arange(1, query.shape[2]+1, device=query.device, dtype=query.dtype)
+        n = torch.arange(1, query.shape[2]+1, device=query.device, dtype=query.dtype).unsqueeze(-1)
         mean_keys = torch.cumsum(key, dim=2)
-        mean_keys = mean_keys/n.unsqueeze(-1)
+        mean_keys = mean_keys/n
         mean_values = torch.cumsum(value, dim=2)
-        mean_values = mean_values/n.unsqueeze(-1)
+        mean_values = mean_values/n
         Kij = torch.einsum("bhqi,bhqj->bhqij", key, key)
-        Kij = Kij - n[:, None, None]*torch.einsum("bhqi,bhqj->bhqij", mean_keys, mean_keys)
+        Kij = torch.cumsum(Kij, dim=2) # was missing...
+        Kij = Kij - n[:, None]*torch.einsum("bhqi,bhqj->bhqij", mean_keys, mean_keys)
         Mij = torch.einsum("bhqi,bhqj->bhqij", key, value)
-        Mij = Mij - n[:, None, None]*torch.einsum("bhqi,bhqj->bhqij", mean_keys, mean_values)
-        
+        Mij = torch.cumsum(Mij, dim=2) # was missing...
+        Mij = Mij - n[:, None]*torch.einsum("bhqi,bhqj->bhqij", mean_keys, mean_values)
         qWij = torch.einsum("bhqi,bhqij->bhqj", self.stability_factor*query, Mij/torch.sqrt(self.head_size))
         qqKij = torch.einsum("bhqi,bhqj,bhqij->bhq", query, self.stability_factor*query, 1/(2*self.head_size)*Kij)
         denominator = self.stability_factor*n+qqKij
-        numerator = torch.einsum("bhq,bhqe->bhqe", denominator, mean_values) + qWij
         
-        return numerator/denominator.unsqueeze(-1) # [batch_size, num_heads, querylength, embed_size_per_head]
+        return mean_values + qWij/denominator.unsqueeze(-1) # [batch_size, num_heads, querylength, embed_size_per_head]
     
 class GPTNeoXAttention(nn.Module):
     def __init__(self, config, layer_idx=None):
