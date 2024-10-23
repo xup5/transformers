@@ -243,7 +243,6 @@ class GPTNeoXAttention(nn.Module):
 
         self.register_buffer("masked_bias", torch.tensor(-1e9), persistent=False)
         self.rotary_emb = GPTNeoXRotaryEmbedding(config=self.config)
-        self._attn_approximation = AttentionApproximation(config)
         self._attn_approximation_all = AttentionApproximationAll(config)
 
         if layer_idx is None:
