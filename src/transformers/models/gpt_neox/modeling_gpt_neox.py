@@ -201,11 +201,15 @@ class AttentionApproximationAll(nn.Module):
         mean_values = mean_values/n
         center_values = value - mean_values
         qK = torch.einsum("bhqi,bhpi->bhqp", query, center_keys) # [batch_size, num_heads, querylength, querylength]
+        
+        # mask the upper triangular part of qK
+        qK = qK.view(-1, qK.shape[2], qK.shape[3])
+        qK = torch.tril(qK)
+        qK = qK_squared.view(query.shape[0], query.shape[1], query.shape[2], query.shape[2])
+        
         qK_squared = torch.cumsum(qK**2/(2*self.head_size), dim=2)
-        qK_squared = qK_squared.view(-1, qK.shape[2], qK.shape[3])
-        qK_squared = torch.tril(qK_squared)
-        qK_squared = qK_squared.view(qK.shape)
         qK_squared = torch.sum(qK_squared, dim=3)
+        
         denominator = n.squeeze() + qK_squared
         
         qKV = torch.einsum("bhqp,bhpi->bhqi", qK, center_values)/torch.sqrt(self.head_size)
