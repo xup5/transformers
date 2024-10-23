@@ -192,6 +192,7 @@ class AttentionApproximationAll(nn.Module):
     def forward(self, query, key, value):
         # query, key, value: [batch_size, num_heads, seqlength, embed_size_per_head]
         # calculate state for each token.
+        
         n = torch.arange(1, query.shape[2]+1, device=query.device, dtype=query.dtype).unsqueeze(-1)
         mean_keys = torch.cumsum(key, dim=2)
         mean_keys = mean_keys/n
@@ -199,32 +200,36 @@ class AttentionApproximationAll(nn.Module):
         mean_values = torch.cumsum(value, dim=2)
         mean_values = mean_values/n
         center_values = value - mean_values
-        Kij = torch.einsum("bhqi,bhqj->bhqij", center_keys, center_keys)
-        Kij = torch.cumsum(Kij, dim=2)
-        Mij = torch.einsum("bhqi,bhqj->bhqij", center_keys, center_values)
-        Mij = torch.cumsum(Mij, dim=2)
-        qWij = torch.einsum("bhqi,bhqij->bhqj", query, Mij/torch.sqrt(self.head_size))
-        qqKij = torch.einsum("bhqi,bhqj,bhqij->bhq", query, query, 1/(2*self.head_size)*Kij)
-        denominator = n.squeeze()+qqKij
+        qK = torch.einsum("bhqi,bhpi->bhqp", query, center_keys) # [batch_size, num_heads, querylength, querylength]
+        qK_squared = torch.cumsum(qK**2/(2*self.head_size), dim=2)
+        qK_squared = qK_squared.view(-1, qK.shape[2], qK.shape[3])
+        qK_squared = torch.tril(qK_squared)
+        qK_squared = qK_squared.view(qK.shape)
+        qK_squared = torch.sum(qK_squared, dim=3)
+        denominator = n.squeeze() + qK_squared
         
-        return mean_values + qWij/denominator.unsqueeze(-1) # [batch_size, num_heads, querylength, embed_size_per_head]
-    
+        qKV = torch.einsum("bhqp,bhpi->bhqi", qK, center_values)/torch.sqrt(self.head_size)
+        
+        return mean_values + qKV/denominator.unsqueeze(-1) # [batch_size, num_heads, querylength, embed_size_per_head]
+
+        
         # n = torch.arange(1, query.shape[2]+1, device=query.device, dtype=query.dtype).unsqueeze(-1)
         # mean_keys = torch.cumsum(key, dim=2)
         # mean_keys = mean_keys/n
+        # center_keys = key - mean_keys
         # mean_values = torch.cumsum(value, dim=2)
         # mean_values = mean_values/n
-        # Kij = torch.einsum("bhqi,bhqj->bhqij", key, key)
-        # Kij = torch.cumsum(Kij, dim=2) # was missing...
-        # Kij = Kij - n[:, None]*torch.einsum("bhqi,bhqj->bhqij", mean_keys, mean_keys)
-        # Mij = torch.einsum("bhqi,bhqj->bhqij", key, value)
-        # Mij = torch.cumsum(Mij, dim=2) # was missing...
-        # Mij = Mij - n[:, None]*torch.einsum("bhqi,bhqj->bhqij", mean_keys, mean_values)
-        # qWij = torch.einsum("bhqi,bhqij->bhqj", self.stability_factor*query, Mij/torch.sqrt(self.head_size))
-        # qqKij = torch.einsum("bhqi,bhqj,bhqij->bhq", query, self.stability_factor*query, 1/(2*self.head_size)*Kij)
-        # denominator = self.stability_factor*n.squeeze()+qqKij
+        # center_values = value - mean_values
+        # Kij = torch.einsum("bhqi,bhqj->bhqij", center_keys, center_keys)
+        # Kij = torch.cumsum(Kij, dim=2)
+        # Mij = torch.einsum("bhqi,bhqj->bhqij", center_keys, center_values)
+        # Mij = torch.cumsum(Mij, dim=2)
+        # qWij = torch.einsum("bhqi,bhqij->bhqj", query, Mij/torch.sqrt(self.head_size))
+        # qqKij = torch.einsum("bhqi,bhqj,bhqij->bhq", query, query, 1/(2*self.head_size)*Kij)
+        # denominator = n.squeeze()+qqKij
         
         # return mean_values + qWij/denominator.unsqueeze(-1) # [batch_size, num_heads, querylength, embed_size_per_head]
+
     
 class GPTNeoXAttention(nn.Module):
     def __init__(self, config, layer_idx=None):
